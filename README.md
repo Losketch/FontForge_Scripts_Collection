@@ -1,4 +1,4 @@
-# FontForge Scripts Collection
+# FontForge Scripts Collection（初成测试）
 
 一组用于字体处理的 FontForge Python 脚本集合，提供字体优化、格式转换和 SVG 字体生成等功能。
 
