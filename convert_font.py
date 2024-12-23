@@ -12,7 +12,7 @@ Supported formats 支持的格式:
 - SVG  (Scalable Vector Graphics Font)
 
 Usage 使用方法:
-    python convert_font.py input.ttf -o output.woff2 -f woff2
+    fontforge -script convert_font.py input.ttf -o output.woff2 -f woff2
     
 Arguments 参数:
     input_font      Input font file path 输入字体文件路径
