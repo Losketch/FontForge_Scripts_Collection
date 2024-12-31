@@ -152,7 +152,7 @@ def process_font(input_file, simplify_value=0.5):
         # 第一轮优化：初步清理和简化
         glyph.simplify(0.1, ('mergelines', 'choosehv'), 0.1, 0.1, 0)
         glyph.round(1)
-        glyph.simplify(0, ('forcelines',))  # 强制将接近直线的段转换为直线
+        # glyph.simplify(0, ('forcelines',))  # 强制将接近直线的段转换为直线
 
         # 处理直线段端点
         process_line_endpoints(glyph)
@@ -164,7 +164,7 @@ def process_font(input_file, simplify_value=0.5):
         glyph.canonicalStart()        # 设置标准起始点，有助于后续处理
 
         # 第三轮优化：最终清理
-        glyph.round()                 # 将控制点坐标取整
+        # glyph.round()                 # 将控制点坐标取整
         glyph.simplify()              # 再次简化轮廓，去除冗余点
 
         # 第四轮优化：轮廓处理和微调
