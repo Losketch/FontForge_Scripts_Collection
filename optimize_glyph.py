@@ -151,7 +151,7 @@ def process_font(input_file, simplify_value=0.5):
 
         # 第一轮优化：初步清理和简化
         glyph.simplify(0.1, ('mergelines', 'choosehv'), 0.1, 0.1, 0)
-        glyph.round(1)
+        # glyph.round(1)
         # glyph.simplify(0, ('forcelines',))  # 强制将接近直线的段转换为直线
 
         # 处理直线段端点
