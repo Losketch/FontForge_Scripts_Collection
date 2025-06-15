@@ -23,125 +23,205 @@ Arguments 参数:
 """
 
 import os
+import sys
 import argparse
 import time
-from datetime import datetime
-os.system('color')
+import logging
+from typing import Dict, Optional, Tuple, Any, List
+from pathlib import Path
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 常量定义
+SUPPORTED_FORMATS = {
+    'ttf': 'TrueType 字体 (.ttf)',
+    'otf': 'OpenType 字体 (.otf)',
+    'woff': 'Web Open Font Format (.woff)',
+    'woff2': 'Web Open Font Format 2 (.woff2)',
+    'eot': 'Embedded OpenType (.eot)',
+    'svg': 'SVG 字体 (.svg)'
+}
+
+# 格式特定的转换标志
+FORMAT_FLAGS = {
+    'otf': ('opentype', 'round', 'dummy-dsig', 'apple'),
+    'ttf': ('opentype', 'round', 'dummy-dsig', 'apple', 'short-post', 'old-kern'),
+    'woff2': ('opentype', 'round', 'dummy-dsig', 'no-flex', 'no-hints', 'short-post', 'omit-instructions'),
+    # 其他格式使用默认设置
+}
 
 try:
     import fontforge
 except ModuleNotFoundError:
-    print("\n\033[31m警告：当前没有使用 `fontforge` 运行，功能无法使用\033[0m")
-    pass
+    logger.warning("当前没有使用 `fontforge` 运行，功能无法使用")
+    fontforge = None
 
-def setup_font_properties(font, family_name=None, version=None):
-    """设置字体属性"""
-    try:
-        if family_name:
-            try:
-                font.familyname = family_name
-                font.fontname = family_name.replace(' ', '')
-                font.fullname = family_name
-            except Exception as e:
-                print(f"\033[33m警告：设置字体名称失败：{str(e)}\033[0m")
-        
-        if version:
-            try:
-                font.version = version
-            except Exception as e:
-                print(f"\033[33m警告：设置版本号失败：{str(e)}\033[0m")
-        
-        # 安全地设置其他属性
-        try:
-            font.head_optimized_for_cleartype = True
-        except:
-            pass
-            
-        try:
-            font.os2_typoascent = font.ascent
-            font.os2_typodescent = -font.descent
-            font.os2_typolinegap = 0
-            font.hhea_ascent = font.ascent
-            font.hhea_descent = -font.descent
-            font.hhea_linegap = 0
-        except:
-            pass
-            
-        try:
-            font.gasp = {8: ('gridfit', 'antialias', 'symmetric-smoothing'),
-                        16: ('gridfit', 'antialias', 'symmetric-smoothing'),
-                        65535: ('gridfit', 'antialias', 'symmetric-smoothing')}
-        except:
-            pass
-            
-    except Exception as e:
-        print(f"\033[33m警告：设置字体属性时出现问题：{str(e)}\033[0m")
 
-def convert_font(input_path, output_path, format_type, optimization='default', family_name=None, version=None):
-    """转换字体文件格式"""
-    try:
-        start_time = time.time()
+class FontConverter:
+    """字体转换器类，封装所有字体处理逻辑"""
+    
+    def __init__(self, input_path: str, output_path: Optional[str] = None, 
+                 format_type: str = 'woff2', family_name: Optional[str] = None, 
+                 version: Optional[str] = None):
+        """
+        初始化字体转换器
         
-        # 验证输入文件
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"\033[31m错误：未找到字体文件：{input_path}\033[0m")
-
-        print(f"\n正在加载字体：{input_path}")
-        font = fontforge.open(input_path)
+        Args:
+            input_path: 输入字体文件路径
+            output_path: 输出字体文件路径（可选）
+            format_type: 输出格式类型
+            family_name: 字体族名称（可选）
+            version: 字体版本号（可选）
+        """
+        self.input_path = input_path
+        self.format_type = format_type
+        self.family_name = family_name
+        self.version = version
         
+        # 如果未指定输出路径，根据输入文件名生成
         if not output_path:
-            base_name = os.path.splitext(input_path)[0]
-            output_path = f"{base_name}.{format_type}"
-            
-        # 设置字体属性
-        setup_font_properties(font, family_name, version)
-
-        print(f"\n正在使用 {optimization} 模式转换字体...")
-        
-        # 根据不同格式使用不同的优化参数
-        if format_type == 'otf':
-            # 使用CFF格式，添加优化选项
-            font.generate(output_path, flags=('opentype', 'round', 'dummy-dsig', 'apple'))
-        elif format_type == 'ttf':
-            # TTF格式，保留提示信息以优化显示效果
-            font.generate(output_path, flags=('opentype', 'round', 'dummy-dsig', 'apple', 'short-post', 'old-kern'))
-        elif format_type == 'woff2':
-            # WOFF2 使用最大压缩
-            font.generate(output_path, flags=('opentype', 'round', 'dummy-dsig', 'no-flex', 'no-hints', 'short-post', 'omit-instructions'))
+            base_name = Path(input_path).stem
+            self.output_path = f"{base_name}.{format_type}"
         else:
-            # 其他格式使用默认参数
-            font.generate(output_path)
-
-        # 显示转换信息
+            self.output_path = output_path
+            
+        self.font = None
+    
+    def setup_font_properties(self) -> None:
+        """设置字体属性"""
+        if not self.font:
+            return
+            
+        try:
+            # 设置字体名称
+            if self.family_name:
+                self.font.familyname = self.family_name
+                self.font.fontname = self.family_name.replace(' ', '')
+                self.font.fullname = self.family_name
+            
+            # 设置版本号
+            if self.version:
+                self.font.version = self.version
+            
+            # 优化设置
+            self._apply_optimization_settings()
+                
+        except Exception as e:
+            logger.warning(f"设置字体属性时出现问题：{str(e)}")
+    
+    def _apply_optimization_settings(self) -> None:
+        """应用字体优化设置"""
+        try:
+            # ClearType 优化
+            self.font.head_optimized_for_cleartype = True
+        except Exception:
+            pass
+            
+        try:
+            # 垂直度量设置
+            self.font.os2_typoascent = self.font.ascent
+            self.font.os2_typodescent = -self.font.descent
+            self.font.os2_typolinegap = 0
+            self.font.hhea_ascent = self.font.ascent
+            self.font.hhea_descent = -self.font.descent
+            self.font.hhea_linegap = 0
+        except Exception:
+            pass
+            
+        try:
+            # 栅格化平滑设置
+            self.font.gasp = {
+                8: ('gridfit', 'antialias', 'symmetric-smoothing'),
+                16: ('gridfit', 'antialias', 'symmetric-smoothing'),
+                65535: ('gridfit', 'antialias', 'symmetric-smoothing')
+            }
+        except Exception:
+            pass
+    
+    def convert(self) -> bool:
+        """
+        执行字体转换
+        
+        Returns:
+            bool: 转换是否成功
+        """
+        if fontforge is None:
+            logger.error("FontForge 模块未加载，无法进行转换")
+            return False
+            
+        try:
+            start_time = time.time()
+    
+            # 检查输入文件是否存在
+            if not os.path.exists(self.input_path):
+                raise FileNotFoundError(f"未找到字体文件：{self.input_path}")
+    
+            logger.info(f"正在加载字体：{self.input_path}")
+            self.font = fontforge.open(self.input_path)
+            
+            # 设置字体属性
+            self.setup_font_properties()
+    
+            logger.info(f"正在转换字体到 {self.format_type} 格式...")
+            
+            # 获取特定格式的标志，如果未定义则使用默认值
+            flags = FORMAT_FLAGS.get(self.format_type, ())
+            self.font.generate(self.output_path, flags=flags)
+    
+            # 计算并显示统计信息
+            self._show_conversion_stats(start_time)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"转换过程中出现问题：{str(e)}")
+            return False
+        finally:
+            # 确保关闭字体文件
+            if self.font:
+                try:
+                    self.font.close()
+                except Exception:
+                    pass
+    
+    def _show_conversion_stats(self, start_time: float) -> None:
+        """显示转换统计信息"""
         end_time = time.time()
-        input_size = os.path.getsize(input_path) / 1024  # KB
-        output_size = os.path.getsize(output_path) / 1024  # KB
         
-        print(f"\n转换完成：")
-        print(f"处理时间：{end_time - start_time:.2f} 秒")
-        print(f"源文件：{input_size:.2f} KB")
-        print(f"转换后：{output_size:.2f} KB")
-        print(f"大小变化：{((output_size/input_size)-1)*100:+.1f}%")
+        if not os.path.exists(self.output_path):
+            logger.warning("无法找到输出文件，无法显示统计信息")
+            return
+            
+        input_size = os.path.getsize(self.input_path) / 1024  # KB
+        output_size = os.path.getsize(self.output_path) / 1024  # KB
         
-        print(f"\033[32m✓ 字体已保存为 {output_path}\033[0m")
-        return True
+        logger.info("\n转换完成：")
+        logger.info(f"处理时间：{end_time - start_time:.2f} 秒")
+        logger.info(f"源文件：{input_size:.2f} KB")
+        logger.info(f"转换后：{output_size:.2f} KB")
+        logger.info(f"大小变化：{((output_size/input_size)-1)*100:+.1f}%")
         
-    except Exception as e:
-        print(f"\033[31m错误：转换过程中出现问题：{str(e)}\033[0m")
-        return False
+        logger.info(f"✓ 字体已保存为 {self.output_path}")
 
-if __name__ == "__main__":
-    # 支持的字体格式
-    SUPPORTED_FORMATS = {
-        'ttf': 'TrueType 字体 (.ttf)',
-        'otf': 'OpenType 字体 (.otf)',
-        'woff': 'Web Open Font Format (.woff)',
-        'woff2': 'Web Open Font Format 2 (.woff2)',
-        'eot': 'Embedded OpenType (.eot)',
-        'svg': 'SVG 字体 (.svg)'
-    }
 
-    parser = argparse.ArgumentParser(description='字体格式转换工具')
+def parse_arguments() -> argparse.Namespace:
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description='字体格式转换工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='\n'.join([
+            "支持的格式：",
+            *[f"  {fmt:<6} - {desc}" for fmt, desc in SUPPORTED_FORMATS.items()],
+            "\n使用示例：",
+            f"  fontforge -script {Path(__file__).name} input.ttf -o output.woff2 -f woff2"
+        ])
+    )
+    
     parser.add_argument('input_font', help='输入字体文件路径')
     parser.add_argument('-o', '--output', help='输出字体文件路径（可选）')
     parser.add_argument(
@@ -153,20 +233,32 @@ if __name__ == "__main__":
     parser.add_argument('--family-name', help='设置字体族名称')
     parser.add_argument('--version', help='设置字体版本号')
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def main() -> int:
+    """主函数"""
+    args = parse_arguments()
+    
     if not args.input_font:
-        print("\033[33m使用示例：")
-        print(f"python {os.path.basename(__file__)} input.ttf -o output.woff2 -f woff2")
-        print("\n支持的格式：")
-        for fmt, desc in SUPPORTED_FORMATS.items():
-            print(f"  {fmt:<6} - {desc}")
-    else:
-        convert_font(
-            args.input_font,
-            args.output,
-            args.format,
-            args.family_name,
-            args.version
-        )
-    input("\033[0m按回车键退出...")
+        return 1
+        
+    converter = FontConverter(
+        args.input_font,
+        args.output,
+        args.format,
+        args.family_name,
+        args.version
+    )
+    
+    success = converter.convert()
+    
+    # 交互模式下等待用户按键
+    if sys.stdin.isatty():
+        input("\n按回车键退出...")
+        
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

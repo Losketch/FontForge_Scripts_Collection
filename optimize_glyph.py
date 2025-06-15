@@ -10,7 +10,7 @@ This script optimizes font glyphs by:
 - Optimizing line endpoints
 - Adding hints for better rendering
 
-Usage:
+Usage 使用方法:
     fontforge -script optimize_glyph.py "font_file_path"
     fontforge -script optimize_glyph.py "font_file_path" -s simplify_value
 
@@ -21,187 +21,257 @@ Arguments:
                    - 1.0-2.0: Balanced mode, moderate optimization
                    - 2.0-3.0: Aggressive mode, maximum simplification
 
-Output:
+Output 输出:
     Creates a new optimized font file with "_merge_glyphs" suffix
 """
 
 import sys
 import os
-import io
 import time
-import contextlib
+import argparse
+import logging
+from typing import List, Optional, Tuple
 
-os.system('color')
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 try:
     import fontforge
 except ModuleNotFoundError:
-    print("\n\033[31m警告：当前没有使用 `fontforge` 运行，功能无法使用\033[0m")
-    pass
+    logger.error("警告：当前没有使用 `fontforge` 运行，功能无法使用")
 
-def format_time(seconds):
-    """将秒数转换为人类可读的时间格式"""
-    if seconds < 60:
-        return f"{seconds:.1f}秒"
-    elif seconds < 3600:
-        minutes = seconds / 60
-        return f"{minutes:.1f}分钟"
-    else:
-        hours = seconds / 3600
-        return f"{hours:.1f}小时"
+class TimeFormatter:
+    """时间格式化工具类"""
 
-def get_glyph_info(glyph):
-    """获取字形的可读信息"""
-    try:
-        if glyph.unicode != -1:  # 如果有 Unicode 值
-            char = chr(glyph.unicode)
-            return f"U+{glyph.unicode:04X}"
-        else:  # 如果没有 Unicode 值，只返回字形名
+    @staticmethod
+    def format_time(seconds: float) -> str:
+        """将秒数格式化为人类可读的时间格式"""
+        if seconds < 60:
+            return f"{seconds:.1f}秒"
+        elif seconds < 3600:
+            minutes = seconds / 60
+            return f"{minutes:.1f}分钟"
+        else:
+            hours = seconds / 3600
+            return f"{hours:.1f}小时"
+
+class GlyphProcessor:
+    """字形处理器类，处理单个字形的优化操作"""
+
+    def __init__(self, simplify_value: float = 0.5):
+        self.simplify_value = simplify_value
+
+    @staticmethod
+    def get_glyph_info(glyph) -> str:
+        """获取字形的Unicode或名称信息"""
+        try:
+            if glyph.unicode != -1:
+                return f"U+{glyph.unicode:04X}"
+            else:
+                return f"{glyph.glyphname}"
+        except (ValueError, AttributeError):
             return f"{glyph.glyphname}"
-    except (ValueError, AttributeError):
-        return f"{glyph.glyphname}"
 
-def process_compound_glyph(glyph):
-    """处理复合字形，将引用转换为实际轮廓"""
-    try:
-        if len(glyph.references) > 0:
-            try:
-                glyph.unlinkReferences()
-            except (AttributeError, TypeError):
-                glyph.unlink()
-    except (AttributeError, TypeError):
-        pass
+    @staticmethod
+    def process_compound_glyph(glyph) -> None:
+        """处理复合字形，解除引用"""
+        try:
+            if len(glyph.references) > 0:
+                try:
+                    glyph.unlinkReferences()
+                except (AttributeError, TypeError):
+                    glyph.unlink()
+        except (AttributeError, TypeError):
+            pass
 
-def process_line_endpoints(glyph):
-    """处理直线段端点，确保直线段的端点是方形控点"""
-    contours = glyph.foreground
-    for contour in contours:
-        prev_point = None
-        for point in contour:
-            if prev_point is not None:
-                # 如果两点构成水平或垂直线
-                if (abs(point.x - prev_point.x) < 0.1 or 
-                    abs(point.y - prev_point.y) < 0.1):
-                    point.type = fontforge.splineCorner
-                    prev_point.type = fontforge.splineCorner
-            prev_point = point
+    @staticmethod
+    def process_line_endpoints(glyph) -> None:
+        """处理线条端点，优化接近水平或垂直的线段"""
+        contours = glyph.foreground
+        for contour in contours:
+            prev_point = None
+            for point in contour:
+                if prev_point is not None:
+                    if (abs(point.x - prev_point.x) < 0.1 or 
+                        abs(point.y - prev_point.y) < 0.1):
+                        point.type = fontforge.splineCorner
+                        prev_point.type = fontforge.splineCorner
+                prev_point = point
 
-def processing_optimization_glyph_extension(glyph):
-    """处理优化字形扩展"""
-    glyph.simplify(0.5, ('mergelines', 'smoothcurves', 'choosehv', 'removesingletonpoints' ), 0.3, 0, 0.5)
-    glyph.addExtrema()
-    glyph.width = int(round(glyph.width / 10.0) * 10)
-    glyph.balance()  # 平衡贝塞尔控制点
-    glyph.autoHint()
+    def process_glyph(self, glyph) -> None:
+        """应用所有优化处理到单个字形"""
+        # 解除复合字形引用
+        self.process_compound_glyph(glyph)
 
-def process_font(input_file, simplify_value=0.5):
-    """主函数"""
-    try:
-        font = fontforge.open(input_file)
-    except OSError as e:
-        print(f"\033[31m错误：无法打开字体文件 - {e}\033[0m")
-        return
-    glyphs = list(font.glyphs())
-    total_glyphs = len(glyphs)
+        # 初步简化
+        glyph.simplify(0.1, ('mergelines', 'choosehv'), 0.1, 0.1, 0)
 
-    # 验证字形数量
-    if total_glyphs == 0:
-        print("警告：没有找到可处理的字形")
-        return
+        # 处理线段端点
+        self.process_line_endpoints(glyph)
 
-    start_time = time.time()
-    last_update_time = start_time
+        # 主要简化和优化步骤
+        glyph.simplify(self.simplify_value, 
+                     ('mergelines', 'smoothcurves', 'removesingletonpoints'), 
+                     0.3, 0, 0.5)
+        glyph.canonicalContours()
+        glyph.canonicalStart()
+        glyph.simplify()
+        glyph.removeOverlap()
+        glyph.correctDirection()
+        glyph.simplify(self.simplify_value, 
+                     ('mergelines', 'smoothcurves'), 
+                     0.3, 0, 0.5)
+        glyph.round()
+        glyph.autoHint()
 
-    print(f"开始处理字体，共 {total_glyphs} 个字形...")
-    print("进度", end="")
+        # 扩展优化
+        self.optimize_glyph_extension(glyph)
 
-    for index, glyph in enumerate(glyphs):
-        # 进度计算
+    @staticmethod
+    def optimize_glyph_extension(glyph) -> None:
+        """应用扩展优化处理"""
+        glyph.simplify(0.5, 
+                     ('mergelines', 'smoothcurves', 'choosehv', 'removesingletonpoints'), 
+                     0.3, 0, 0.5)
+        glyph.width = int(round(glyph.width / 10.0) * 10)
+        glyph.balance()
+        glyph.autoHint()
+
+        glyph.simplify(1, ('setstarttoextremum', 'removesingletonpoints', 'forcelines'))
+        glyph.cluster(0.5)
+        glyph.removeOverlap()
+        glyph.simplify(1)
+        glyph.round()
+
+
+class ProgressTracker:
+    """进度跟踪器类，管理进度显示和时间估计"""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.time_formatter = TimeFormatter()
+
+        logger.info(f"开始处理字体，共 {total} 个字形...")
+        print("进度", end="")
+
+    def update(self, current: int, glyph_info: str) -> None:
+        """更新并显示进度"""
         current_time = time.time()
-        elapsed_time = current_time - start_time
-        progress = (index + 1) / total_glyphs if total_glyphs > 0 else 0
+        elapsed_time = current_time - self.start_time
+        progress = current / self.total if self.total > 0 else 0
 
-        # 预估剩余时间
-        if index > 0 and elapsed_time > 0:  # 添加 elapsed_time 检查
-            glyphs_per_second = (index + 1) / elapsed_time
-            remaining_glyphs = total_glyphs - (index + 1)
+        # 计算剩余时间估计
+        if current > 0 and elapsed_time > 0:
+            glyphs_per_second = current / elapsed_time
+            remaining_glyphs = self.total - current
             estimated_remaining_time = remaining_glyphs / glyphs_per_second
         else:
             estimated_remaining_time = 0
 
-        glyph_info = get_glyph_info(glyph)
-
-        # 更新进度条（每n秒更新一次）
-        if current_time - last_update_time >= 0.2:
-            bar_length = 30
-            filled_length = int(bar_length * progress)
-            bar = "#" * filled_length + "-" * (bar_length - filled_length)
-
-            print(f"\r\033[34m进度({index + 1}/{total_glyphs})\033[32m: [{bar}] "
-                f"\033[35m({progress:.1%})\033[0m "
-                f"\033[33m⏱️ {format_time(elapsed_time)} "
-                f"\033[36m⏳ {format_time(estimated_remaining_time)} "
-                f"\033[0m⚡ 当前处理: {glyph_info}",
-                end="", flush=True
+        # 限制更新频率，减少屏幕刷新
+        if current_time - self.last_update_time >= 0.2:
+            self._display_progress(
+                current, 
+                progress, 
+                elapsed_time, 
+                estimated_remaining_time, 
+                glyph_info
             )
-            last_update_time = current_time
+            self.last_update_time = current_time
 
-        # 处理复合字形
-        process_compound_glyph(glyph)
+    def _display_progress(self, current: int, progress: float, 
+                         elapsed_time: float, remaining_time: float, 
+                         glyph_info: str) -> None:
+        """显示进度条和相关信息"""
+        bar_length = 30
+        filled_length = int(bar_length * progress)
+        bar = "#" * filled_length + "-" * (bar_length - filled_length)
 
-        # 第一轮优化：初步清理和简化
-        glyph.simplify(0.1, ('mergelines', 'choosehv'), 0.1, 0.1, 0)
-        # glyph.round(1)
-        # glyph.simplify(0, ('forcelines',))  # 强制将接近直线的段转换为直线
+        formatted_elapsed = self.time_formatter.format_time(elapsed_time)
+        formatted_remaining = self.time_formatter.format_time(remaining_time)
 
-        # 处理直线段端点
-        process_line_endpoints(glyph)
-        glyph.simplify(simplify_value, ('mergelines', 'smoothcurves', 'removesingletonpoints'), 0.3, 0, 0.5)
+        print(f"\r进度({current}/{self.total}): [{bar}] ({progress:.1%}) "
+              f"⏱️ {formatted_elapsed} ⏳ {formatted_remaining} "
+              f"⚡ 当前处理: {glyph_info}", end="", flush=True)
 
-        # 第二轮优化：添加必要的控制点和标准化
-        glyph.addExtrema()            # 在曲线的极值处添加控制点，提高编辑精度
-        glyph.canonicalContours()     # 确保轮廓按标准顺序排列
-        glyph.canonicalStart()        # 设置标准起始点，有助于后续处理
+    def complete(self) -> None:
+        """完成进度显示"""
+        total_time = time.time() - self.start_time
+        bar = "=" * 30
+        print(f"\n进度({self.total}/{self.total}): [{bar}] (100%) "
+              f"⏱️ 总用时: {self.time_formatter.format_time(total_time)}")
 
-        # 第三轮优化：最终清理
-        # glyph.round()                 # 将控制点坐标取整
-        glyph.simplify()              # 再次简化轮廓，去除冗余点
 
-        # 第四轮优化：轮廓处理和微调
-        glyph.removeOverlap()         # 合并所有重叠的路径
-        glyph.correctDirection()      # 确保外轮廓为顺时针，内轮廓为逆时针
-        glyph.simplify(simplify_value, ('mergelines', 'smoothcurves'), 0.3, 0, 0.5)
-        glyph.round()                 # 最终的坐标取整
-        glyph.autoHint()              # 添加自动提示信息，改善小尺寸显示效果
+class FontOptimizer:
+    """字体优化器类，管理整个字体文件的处理流程"""
 
-        # 处理优化字形扩展（可选）
-        # processing_optimization_glyph_extension(glyph)
+    def __init__(self, simplify_value: float = 0.5):
+        self.simplify_value = simplify_value
+        self.glyph_processor = GlyphProcessor(simplify_value)
 
-    # 完成处理
-    total_time = time.time() - start_time
-    bar = "=" * 30
-    print(f"\n\033[34m进度({total_glyphs}/{total_glyphs})\033[32m: [{bar}] "
-        f"\033[35m(100%)\033[0m "
-        f"\033[33m⏱️ 总用时: {format_time(total_time)}\033[0m"
-    )
-    print(f"\n新字体保存中...")
+    def process_font(self, input_file: str) -> Optional[str]:
+        """处理整个字体文件，优化所有字形"""
+        try:
+            font = fontforge.open(input_file)
+        except OSError as e:
+            logger.error(f"错误：无法打开字体文件 - {e}")
+            return None
 
-    # 保存新字体
-    file_name, file_extension = os.path.splitext(input_file)
-    output_file = f"{file_name}_merge_glyphs{file_extension}"
-    font.generate(output_file, flags=('opentype', 'round', 'dummy-dsig', 'apple'))
-    print(f"\n新字体已保存为: {output_file}")
+        glyphs = list(font.glyphs())
+        total_glyphs = len(glyphs)
 
-if __name__ == "__main__":
-    import argparse
+        if total_glyphs == 0:
+            logger.warning("警告：没有找到可处理的字形")
+            return None
 
+        # 初始化进度跟踪器
+        progress = ProgressTracker(total_glyphs)
+
+        # 处理每个字形
+        for index, glyph in enumerate(glyphs):
+            glyph_info = self.glyph_processor.get_glyph_info(glyph)
+            progress.update(index + 1, glyph_info)
+
+            try:
+                self.glyph_processor.process_glyph(glyph)
+            except Exception as e:
+                logger.warning(f"处理字形 {glyph_info} 时出错: {e}")
+                continue
+
+        # 完成进度显示
+        progress.complete()
+
+        # 保存新字体
+        return self._save_font(font, input_file)
+
+    def _save_font(self, font, input_file: str) -> str:
+        """保存处理后的字体文件"""
+        logger.info("新字体保存中...")
+
+        file_name, file_extension = os.path.splitext(input_file)
+        output_file = f"{file_name}_merge_glyphs{file_extension}"
+
+        try:
+            font.generate(output_file, 
+                         flags=('opentype', 'round', 'dummy-dsig', 'apple'))
+            logger.info(f"新字体已保存为: {output_file}")
+            return output_file
+        except Exception as e:
+            logger.error(f"保存字体失败: {e}")
+            return None
+
+def main():
     parser = argparse.ArgumentParser(description='字体轮廓优化工具')
     parser.add_argument('font_file', nargs='?', help='字体文件路径')
-    parser.add_argument(
-        '-s', '--simplify',
-        type=float, default=0.5,
-        help='simplify 参数值 (默认: 0.5)'
-    )
+    parser.add_argument('-s', '--simplify', type=float, default=0.5, 
+                      help='simplify 参数值 (默认: 0.5)')
 
     args = parser.parse_args()
 
@@ -234,13 +304,23 @@ if __name__ == "__main__":
         print("┃　　- 笔画简单的字体可以尝试较大值（2.0-3.0）　　　　　　　　　　　 ┃")
         print("┃　　　　　　　　　　　　　　　　　　 　　　　　　　　　　　　　　　 ┃")
         print('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')
-        input("\033[0m按回车键退出...")
+        logger.error("没有选择字体")
+        input("按回车键退出...")
         sys.exit(1)
 
     try:
-        print(f"\n使用 simplify 参数值: {args.simplify}")
-        process_font(args.font_file, args.simplify)
-        print("处理完成！")
+        logger.info(f"使用 simplify 参数值: {args.simplify}")
+        optimizer = FontOptimizer(args.simplify)
+        output_file = optimizer.process_font(args.font_file)
+
+        if output_file:
+            logger.info("处理完成！")
+        else:
+            logger.error("处理失败！")
     except Exception as e:
-        print(f"\n\033[31m发生严重错误：{str(e)}\033[0m")
+        logger.error(f"发生严重错误：{str(e)}")
         input("按回车键退出...")
+
+
+if __name__ == "__main__":
+    main()
